@@ -1,0 +1,7 @@
+# 超过 GitHub 100MB 限制的大数据文件（可由 build_index.py 从源数据重新生成）
+postings.npz
+tokens.parquet
+
+# Python 缓存
+__pycache__/
+*.pyc
