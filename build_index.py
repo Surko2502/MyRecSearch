@@ -1,10 +1,11 @@
 import pandas as pd
 import json
 import numpy as np
-from config import *
+from pathlib import Path
+BASE = Path(r"D:\RecSeach\Search")
 
-def read_preprocess(base:Path): 
-    df=pd.read_parquet(base / "tokens.parquet")
+def read_preprocess(path:Path): 
+    df=pd.read_parquet(path)
     df["tokens"] = [
         list(h) + list(b)
         for h, b in zip(df["headline_tokens"], df["body_tokens"])
@@ -23,50 +24,59 @@ def read_preprocess(base:Path):
 
     return long_sorted,nid_to_int
 
-class PostingList:
-    def __init__(self,doc_ids:list[int],positions:list[list]):
-        self.doc_ids=doc_ids
-        self.positions=positions
-        self.tfs = [len(p) for p in positions]
-
 def build_idx(long_sorted:pd.DataFrame):
-    word_idx = {}   # term -> PostingList
-    cur_term = None
-    cur_did = None
-    cur_positions = []
-    doc_ids = []
-    positions = []
+    word_idx={} # term -> [offset,df]
+    all_doc_ids=[]
+    all_position=[]
+    pos_offset=[]
+    tfs=[]
 
+    cur_term=None
+    cur_doc_id=None
+    doc_cnt=0
+    pos_cnt=0
     for term, doc_id, pos in zip(
         long_sorted["term"], long_sorted["doc_id"], long_sorted["pos"]
     ):
         if term!=cur_term:
-            if cur_term is not None:
-                doc_ids.append(cur_did)
-                positions.append(cur_positions)
-                word_idx[cur_term] = PostingList(doc_ids,positions)
+            pos_offset.append(pos_cnt)
+            all_doc_ids.append(doc_id)
+            word_idx[term]=[doc_cnt,1]
+
             cur_term=term
-            cur_did = doc_id
-            cur_positions = [pos]
-            doc_ids = []
-            positions = []
-        elif doc_id!=cur_did:
-            if cur_did is not None:
-                doc_ids.append(cur_did)
-                positions.append(cur_positions)
-            cur_did=doc_id
-            cur_positions=[pos]
+            cur_doc_id=doc_id
+
+            doc_cnt+=1
+            pos_cnt+=1
+            all_position.append(pos)
+
+        elif doc_id!=cur_doc_id:
+            pos_offset.append(pos_cnt)
+            all_doc_ids.append(doc_id)
+            word_idx[term][1]+=1
+
+            cur_doc_id=doc_id
+
+            doc_cnt+=1
+            pos_cnt+=1
+            all_position.append(pos)
+
         else:
-            cur_positions.append(pos)
-
-    if cur_term is not None:
-        doc_ids.append(cur_did)
-        positions.append(cur_positions)
-        word_idx[cur_term] = PostingList(doc_ids,positions)
-    return word_idx
-
+            pos_cnt+=1
+            all_position.append(pos)
+    for i,t in enumerate(pos_offset):
+        if i+1<=doc_cnt-1:
+            tfs.append(pos_offset[i+1]-t)
+    tfs.append(pos_cnt-pos_offset[-1])
+    pos_offset.append(pos_cnt)
+    return word_idx,all_doc_ids,all_position,pos_offset,tfs
+        
 # 写入磁盘
-def save_to_disk(base:Path,word_idx:dict,nid_to_int:dict):
+def save_dict_to_json(path:Path,nid_to_int:dict):
+    with open(path / "doc_map.json", "w", encoding="utf-8") as f:
+        json.dump({str(v): k for k, v in nid_to_int.items()}, f, ensure_ascii=False)
+
+def save_idx_to_disk_old(path:Path,word_idx:dict):
     terms = sorted(word_idx.keys())            # 排序让 offset 好算
     term_to_id = {t: i for i, t in enumerate(terms)}
 
@@ -89,23 +99,38 @@ def save_to_disk(base:Path,word_idx:dict,nid_to_int:dict):
             pos_offsets.append(len(all_positions))
 
     np.savez_compressed(
-        base / "postings.npz",
+        path / "postings.npz",
         doc_ids=np.asarray(all_doc_ids, dtype=np.int32),
         tfs=np.asarray(all_tfs, dtype=np.int16),
         positions=np.asarray(all_positions, dtype=np.int32),
         pos_offsets=np.asarray(pos_offsets, dtype=np.int64),   # 长度 = 总 posting 数 + 1
     )
 
-    with open(base / "term_dict.json", "w", encoding="utf-8") as f:
+    with open(path / "term_dict.json", "w", encoding="utf-8") as f:
         json.dump(term_meta, f, ensure_ascii=False)
 
-    with open(base / "doc_map.json", "w", encoding="utf-8") as f:
-        json.dump({str(v): k for k, v in nid_to_int.items()}, f, ensure_ascii=False)
-
+def save_idx_to_disk(path:Path,word_idx:dict,all_doc_ids:list[int],all_positions:list[int],pos_offsets:list[int],tfs:list[int]):
+    terms = sorted(word_idx.keys())
+    term_meta = {}   
+    for tid, t in enumerate(terms):
+        term_meta[t] = {"tid": tid, "df": word_idx.get(t)[1], "offset": word_idx.get(t)[0]}
+    np.savez_compressed(
+            path / "postings.npz",
+            doc_ids=np.asarray(all_doc_ids, dtype=np.int32),
+            tfs=np.asarray(tfs, dtype=np.int16),
+            positions=np.asarray(all_positions, dtype=np.int32),
+            pos_offsets=np.asarray(pos_offsets, dtype=np.int64),  
+        )
+    
+    with open(path / "term_dict.json", "w", encoding="utf-8") as f:
+        json.dump(term_meta, f, ensure_ascii=False)
 def main():
-    long_sorted,nid_to_int=read_preprocess(BASE)
-    word_idx=build_idx(long_sorted)
-    save_to_disk(BASE,word_idx,nid_to_int)
+    long_sorted,nid_to_int=read_preprocess(BASE  / "tokens.parquet")
+    word_idx,all_doc_ids,all_position,pos_offset,tfs=build_idx(long_sorted)
+    save_idx_to_disk(BASE,word_idx,all_doc_ids,all_position,pos_offset,tfs)
+    # word_idx=build_idx(long_sorted)
+    # save_idx_to_disk(BASE,word_idx)
+    save_dict_to_json(BASE,nid_to_int)
 
 if __name__=="__main__":
     main()
